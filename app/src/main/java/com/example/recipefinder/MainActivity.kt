@@ -86,6 +86,8 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import retrofit2.http.Path
 import java.util.concurrent.TimeUnit
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -131,6 +133,7 @@ class RecipeViewModel : ViewModel() {
 
     fun getRecipeDetails(id: Int) {
         isLoading = true
+        error = null
         viewModelScope.launch {
             try {
                 val details = repository.getRecipeDetails(id)
@@ -144,6 +147,9 @@ class RecipeViewModel : ViewModel() {
     }
 
     fun getRecipeById(id: Int): RecipeDetails? {
+        if (recipeDetails?.id != id) {
+            getRecipeDetails(id)
+        }
         return recipeDetails
     }
 }
@@ -221,13 +227,17 @@ fun RecipeListScreen(
             else -> {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(viewModel.recipes) { recipe ->
-                        RecipeItemView(recipe = recipe, onClick = { onRecipeClick(recipe.id) })
+                        RecipeItemView(recipe = recipe, onClick = {
+                            viewModel.getRecipeDetails(recipe.id)
+                            onRecipeClick(recipe.id)
+                        })
                     }
                 }
             }
         }
     }
 }
+
 
 @Composable
 fun RecipeListWithDetailsScreen(viewModel: RecipeViewModel) {
@@ -299,52 +309,87 @@ fun RecipeItemView(recipe: RecipeItem, onClick: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecipeDetailsScreen(recipeId: Int, viewModel: RecipeViewModel, navController: NavController?) {
-    val recipe = viewModel.getRecipeById(recipeId)
+    LaunchedEffect(recipeId) {
+        viewModel.getRecipeDetails(recipeId)  // Load details when screen is launched
+    }
 
-    if (recipe != null) {
-        Scaffold(
-            topBar = {
-                if (navController != null) {
-                    SmallTopAppBar(
-                        title = { Text("Recipe Details") },
-                        navigationIcon = {
-                            IconButton(onClick = { navController.popBackStack() }) {
-                                Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                            }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        if (viewModel.isLoading) {
+            CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+        } else if (viewModel.error != null) {
+            Text(text = viewModel.error!!, color = MaterialTheme.colorScheme.error)
+        } else {
+            val recipe = viewModel.recipeDetails
+            if (recipe != null) {
+                Scaffold(
+                    topBar = {
+                        if (navController != null) {
+                            SmallTopAppBar(
+                                title = { Text("Recipe Details") },
+                                navigationIcon = {
+                                    IconButton(onClick = { navController.popBackStack() }) {
+                                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                                    }
+                                }
+                            )
                         }
-                    )
+                    }
+                ) { paddingValues ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(paddingValues)
+                            .padding(16.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        AsyncImage(
+                            model = recipe.image,
+                            contentDescription = "Recipe Image",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(200.dp),
+                            contentScale = ContentScale.Crop
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Text(
+                            text = "Ingredients:",
+                            style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                        recipe.ingredients.forEach { ingredient ->
+                            Text(
+                                text = "• $ingredient",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Text(
+                            text = "Instructions:",
+                            style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                        recipe.instructions.forEachIndexed { index, instruction ->
+                            Text(
+                                text = "${index + 1}. $instruction",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                    }
                 }
-            }
-        ) { paddingValues ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .padding(16.dp)
-            ) {
-                AsyncImage(
-                    model = recipe.image,
-                    contentDescription = "Recipe Image",
-                    modifier = Modifier.size(200.dp)
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(text = "Ingredients:", style = MaterialTheme.typography.bodyLarge)
-                recipe.ingredients.forEach { ingredient ->
-                    Text(text = "- $ingredient")
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(text = "Instructions:", style = MaterialTheme.typography.bodyLarge)
-                recipe.instructions.forEach { instruction ->
-                    Text(text = instruction)
-                }
+            } else {
+                Text("Loading recipe details...", modifier = Modifier.padding(16.dp))
             }
         }
-    } else {
-        Text("Recipe not found", color = Color.Red, modifier = Modifier.padding(16.dp))
     }
 }
 
@@ -369,6 +414,10 @@ interface SpoonacularApi {
 }
 
 object RetrofitInstance {
+    private val moshi = Moshi.Builder()
+        .add(KotlinJsonAdapterFactory())
+        .build()
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
@@ -377,12 +426,45 @@ object RetrofitInstance {
     val api: SpoonacularApi by lazy {
         Retrofit.Builder()
             .baseUrl("https://api.spoonacular.com/")
-            .addConverterFactory(MoshiConverterFactory.create(Moshi.Builder().add(KotlinJsonAdapterFactory()).build()))
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
             .client(client)
             .build()
             .create(SpoonacularApi::class.java)
     }
 }
+
+data class RecipeIngredientsResponse(
+    @Json(name = "ingredients") val ingredients: List<Ingredient> = emptyList()
+)
+
+data class Ingredient(
+    @Json(name = "originalString") val originalString: String? = null,
+    @Json(name = "name") val name: String? = null,
+    @Json(name = "amount") val amount: Amount? = null,
+    @Json(name = "unit") val unit: String? = null
+) {
+    fun toDisplayString(): String {
+        return originalString ?: buildString {
+            amount?.let { amt ->
+                append(amt.us?.value ?: amt.metric?.value ?: "")
+                append(" ")
+            }
+            append(unit ?: "")
+            append(" ")
+            append(name ?: "")
+        }.trim()
+    }
+}
+
+data class Amount(
+    @Json(name = "us") val us: Measurement? = null,
+    @Json(name = "metric") val metric: Measurement? = null
+)
+
+data class Measurement(
+    @Json(name = "value") val value: Double? = null,
+    @Json(name = "unit") val unit: String? = null
+)
 
 class RecipeRepository {
     private val api = RetrofitInstance.api
@@ -395,14 +477,31 @@ class RecipeRepository {
     }
 
     suspend fun getRecipeDetails(id: Int): RecipeDetails {
-        val ingredients = api.getRecipeIngredients(id)
-        val instructions = api.getRecipeInstructions(id)
-        return RecipeDetails(
-            id = id,
-            image = "https://spoonacular.com/recipeImages/$id-636x393.jpg",
-            ingredients = ingredients.ingredients.map { it.originalString },
-            instructions = instructions.flatMap { it.steps.map { step -> step.step } }
-        )
+        try {
+            val ingredients = api.getRecipeIngredients(id)
+            val instructions = api.getRecipeInstructions(id)
+
+
+            val formattedIngredients = ingredients.ingredients
+                .mapNotNull { ingredient ->
+                    ingredient.toDisplayString().takeIf { it.isNotBlank() }
+                }
+                .ifEmpty { listOf("No ingredients available") }
+
+            val formattedInstructions = instructions
+                .flatMap { it.steps.map { step -> step.step } }
+                .ifEmpty { listOf("No instructions available") }
+
+            return RecipeDetails(
+                id = id,
+                image = "https://spoonacular.com/recipeImages/$id-636x393.jpg",
+                ingredients = formattedIngredients,
+                instructions = formattedInstructions
+            )
+        } catch (e: Exception) {
+            Log.e("RecipeRepository", "Error fetching recipe details", e)
+            throw e
+        }
     }
 }
 
@@ -423,13 +522,6 @@ data class RecipeDetails(
     val instructions: List<String>
 )
 
-data class RecipeIngredientsResponse(
-    @Json(name = "ingredients") val ingredients: List<Ingredient>
-)
-
-data class Ingredient(
-    @Json(name = "originalString") val originalString: String
-)
 
 data class Instruction(
     @Json(name = "steps") val steps: List<InstructionStep>
